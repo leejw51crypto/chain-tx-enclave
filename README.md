@@ -18,10 +18,7 @@ For more details, see the [Crypto.com Chain README](https://github.com/crypto-co
 
 ### Build the Docker image
 ```bash
-$ docker build -t chain-tx-validation \
--f ./tx-validation/Dockerfile . \
---build-arg SGX_MODE=<SW|HW> \
---build-arg NETWORK_ID=<NETWORK_HEX_ID>
+$ docker build -t chain-tx-validation -f ./tx-validation/Dockerfile . --build-arg SGX_MODE=<SW|HW> --build-arg NETWORK_ID=<NETWORK_HEX_ID>
 ```
 
 ### Run the Docker instance
@@ -29,27 +26,20 @@ $ docker build -t chain-tx-validation \
 - Software Simulation Mode
 ```bash
 # docker run --rm -p <HOST_PORT>:<DOCKER_APP_PORT> -rm chain-tx
-$ docker run --rm \
--p 25933:25933 \
-chain-tx-validation
+$ docker run --rm -p 25933:25933 chain-tx-validation
 ```
 
 - Hardware Mode
 ```bash
 # docker run --rm --device /dev/isgx -p <HOST_PORT>:<DOCKER_APP_PORT> chain-tx
-$ docker run --rm \
---device /dev/isgx \
--p 25933:25933 \
-chain-tx-validation
+$ docker run --rm --device /dev/isgx -p 25933:25933 chain-tx-validation
 ```
 
 ### Run /bin/bash inside Docker instance
 
 If you want to get your hands dirty, you can
 ```bash
-$ docker run --rm \
-chain-tx-validation \
-/bin/bash
+$ docker run --rm chain-tx-validation /bin/bash
 ```
 
 ## Build from Source Code
