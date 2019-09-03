@@ -1,4 +1,4 @@
-use failure::ResultExt;
+use failure::{format_err, ResultExt};
 use parity_scale_codec::Encode;
 use secp256k1::schnorrsig::SchnorrSignature;
 use secstr::SecUtf8;
@@ -11,11 +11,14 @@ use chain_core::tx::data::address::ExtendedAddr;
 use chain_core::tx::data::attribute::TxAttributes;
 use chain_core::tx::data::input::TxoPointer;
 use chain_core::tx::data::output::TxOut;
+use chain_core::tx::data::Tx;
 use chain_core::tx::witness::tree::RawPubkey;
+use chain_core::tx::witness::{TxInWitness, TxWitness};
 use chain_core::tx::TxAux;
 use client_common::balance::TransactionChange;
 use client_common::storage::UnauthorizedStorage;
-use client_common::{Error, ErrorKind, PrivateKey, PublicKey, Result, Storage};
+use client_common::tendermint::types::BroadcastTxResult;
+use client_common::{Error, ErrorKind, PrivateKey, PublicKey, Result, SignedTransaction, Storage};
 use client_index::index::{Index, UnauthorizedIndex};
 
 use crate::service::*;
@@ -183,8 +186,10 @@ where
         m: usize,
         n: usize,
     ) -> Result<ExtendedAddr> {
-        // To verify if the passphrase is correct or not
-        self.transfer_addresses(name, passphrase)?;
+        let wallet_public_keys = self.public_keys(&name, &passphrase)?;
+        if !wallet_public_keys.contains(&self_public_key) {
+            return Err(Error::from(ErrorKind::MultiSigInvalidSelfPubKey));
+        }
 
         let root_hash =
             self.root_hash_service
@@ -295,7 +300,7 @@ where
     }
 
     #[inline]
-    fn broadcast_transaction(&self, tx_aux: &TxAux) -> Result<()> {
+    fn broadcast_transaction(&self, tx_aux: &TxAux) -> Result<BroadcastTxResult> {
         self.index.broadcast_transaction(&tx_aux.encode())
     }
 }
@@ -404,6 +409,42 @@ where
     fn signature(&self, session_id: &H256, passphrase: &SecUtf8) -> Result<SchnorrSignature> {
         self.multi_sig_session_service
             .signature(session_id, passphrase)
+    }
+
+    fn transaction(
+        &self,
+        name: &str,
+        session_id: &H256,
+        passphrase: &SecUtf8,
+        unsigned_transaction: Tx,
+    ) -> Result<TxAux> {
+        if unsigned_transaction.inputs.len() != 1 {
+            return Err(format_err!(
+                "Multi-Sig Signing is only supported for transactions with only one input"
+            )
+            .context(ErrorKind::InvalidInput)
+            .into());
+        }
+
+        let output_to_spend = self.output(&unsigned_transaction.inputs[0])?;
+        let root_hash = self
+            .wallet_service
+            .find_root_hash(name, passphrase, &output_to_spend.address)?
+            .ok_or_else(|| Error::from(ErrorKind::AddressNotFound))?;
+        let public_keys = self
+            .multi_sig_session_service
+            .public_keys(session_id, passphrase)?;
+
+        let proof = self
+            .root_hash_service
+            .generate_proof(&root_hash, public_keys, passphrase)?;
+        let signature = self.signature(session_id, passphrase)?;
+
+        let witness = TxWitness::from(vec![TxInWitness::TreeSig(signature, proof)]);
+        let signed_transaction =
+            SignedTransaction::TransferTransaction(unsigned_transaction, witness);
+
+        self.transaction_builder.obfuscate(signed_transaction)
     }
 }
 
@@ -712,10 +753,15 @@ mod tests {
             }
         }
 
-        fn broadcast_transaction(&self, _transaction: &[u8]) -> Result<()> {
+        fn broadcast_transaction(&self, _transaction: &[u8]) -> Result<BroadcastTxResult> {
             let mut changed = self.changed.write().unwrap();
             *changed = true;
-            Ok(())
+            Ok(BroadcastTxResult {
+                code: 0,
+                data: String::from(""),
+                hash: String::from(""),
+                log: String::from(""),
+            })
         }
     }
 
@@ -1130,6 +1176,28 @@ mod tests {
 
         let public_keys = vec![
             PublicKey::from(&PrivateKey::new().unwrap()),
+            PublicKey::from(&PrivateKey::new().unwrap()),
+            PublicKey::from(&PrivateKey::new().unwrap()),
+        ];
+
+        assert_eq!(
+            ErrorKind::MultiSigInvalidSelfPubKey,
+            wallet
+                .new_multisig_transfer_address(
+                    name,
+                    &passphrase,
+                    public_keys.clone(),
+                    public_keys[0].clone(),
+                    2,
+                    3,
+                ).expect_err("New multisig transfer address without self public key in public key list should not work")
+                .kind(),
+            "Should throw error when self public key does not belong to wallet"
+        );
+
+        let wallet_public_key = wallet.new_public_key(name, &passphrase).unwrap();
+        let public_keys = vec![
+            wallet_public_key,
             PublicKey::from(&PrivateKey::new().unwrap()),
             PublicKey::from(&PrivateKey::new().unwrap()),
         ];

@@ -5,12 +5,12 @@ use jsonrpc_core::Result;
 use jsonrpc_derive::rpc;
 
 use chain_core::init::coin::Coin;
-use chain_core::state::account::{StakedStateAddress, StakedStateOpAttributes};
+use chain_core::state::account::{StakedState, StakedStateAddress, StakedStateOpAttributes};
 use chain_core::tx::data::access::{TxAccess, TxAccessPolicy};
 use chain_core::tx::data::address::ExtendedAddr;
 use chain_core::tx::data::attribute::TxAttributes;
 use chain_core::tx::data::input::TxoPointer;
-use client_common::{Error, ErrorKind, PublicKey, Result as CommonResult};
+use client_common::{ErrorKind, PublicKey, Result as CommonResult};
 use client_core::{MultiSigWalletClient, WalletClient};
 use client_network::NetworkOpsClient;
 
@@ -25,6 +25,9 @@ pub trait StakingRpc: Send + Sync {
         to_address: String,
         inputs: Vec<TxoPointer>,
     ) -> Result<()>;
+
+    #[rpc(name = "staking_state")]
+    fn state(&self, request: WalletRequest, address: StakedStateAddress) -> Result<StakedState>;
 
     #[rpc(name = "staking_unbondStake")]
     fn unbond_stake(
@@ -81,7 +84,7 @@ where
     ) -> Result<()> {
         let addr = StakedStateAddress::from_str(&to_address)
             .context(ErrorKind::DeserializationError)
-            .map_err(Into::<Error>::into)
+            .map_err(Into::into)
             .map_err(to_rpc_error)?;
         let attr = StakedStateOpAttributes::new(self.network_id);
         let transaction = self
@@ -97,6 +100,14 @@ where
 
         self.client
             .broadcast_transaction(&transaction)
+            .map_err(to_rpc_error)?;
+
+        Ok(())
+    }
+
+    fn state(&self, request: WalletRequest, address: StakedStateAddress) -> Result<StakedState> {
+        self.ops_client
+            .get_staked_state(&request.name, &request.passphrase, &address)
             .map_err(to_rpc_error)
     }
 
@@ -109,7 +120,7 @@ where
         let attr = StakedStateOpAttributes::new(self.network_id);
         let addr = StakedStateAddress::from_str(&staking_address)
             .context(ErrorKind::DeserializationError)
-            .map_err(Into::<Error>::into)
+            .map_err(Into::into)
             .map_err(to_rpc_error)?;
 
         let transaction = self
@@ -125,7 +136,9 @@ where
 
         self.client
             .broadcast_transaction(&transaction)
-            .map_err(to_rpc_error)
+            .map_err(to_rpc_error)?;
+
+        Ok(())
     }
 
     fn withdraw_all_unbonded_stake(
@@ -137,15 +150,15 @@ where
     ) -> Result<()> {
         let from_address = StakedStateAddress::from_str(&from_address)
             .context(ErrorKind::DeserializationError)
-            .map_err(Into::<Error>::into)
+            .map_err(Into::into)
             .map_err(to_rpc_error)?;
         let to_address = ExtendedAddr::from_str(&to_address)
             .context(ErrorKind::DeserializationError)
-            .map_err(Into::<Error>::into)
+            .map_err(Into::into)
             .map_err(to_rpc_error)?;
         let view_keys = view_keys
-            .into_iter()
-            .map(|key| PublicKey::from_str(&key))
+            .iter()
+            .map(|key| PublicKey::from_str(key))
             .collect::<CommonResult<Vec<PublicKey>>>()
             .map_err(to_rpc_error)?;
 
@@ -181,6 +194,8 @@ where
 
         self.client
             .broadcast_transaction(&transaction)
-            .map_err(to_rpc_error)
+            .map_err(to_rpc_error)?;
+
+        Ok(())
     }
 }

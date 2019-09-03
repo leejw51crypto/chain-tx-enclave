@@ -1,5 +1,5 @@
-use enclave_u_common::enclave_u::{init_enclave, VALIDATION_TOKEN_KEY};
 use crate::enclave_u::{check_initchain, check_transfertx, check_withdraw_tx};
+use crate::enclave_u::{get_token, store_token};
 use chain_core::common::MerkleTree;
 use chain_core::init::address::RedeemAddress;
 use chain_core::init::coin::Coin;
@@ -25,6 +25,8 @@ use chain_core::tx::{
     TxAux,
 };
 use chain_core::ChainInfo;
+use chain_tx_validation::Error;
+use enclave_u_common::enclave_u::{init_enclave, VALIDATION_TOKEN_KEY};
 use env_logger::{Builder, WriteStyle};
 use log::LevelFilter;
 use log::{debug, error, info};
@@ -55,6 +57,11 @@ fn get_account(account_address: &RedeemAddress) -> StakedState {
 
 const TEST_NETWORK_ID: u8 = 0xab;
 
+fn cleanup(db: &mut Db) {
+    db.drop_tree(crate::META_KEYSPACE).expect("test meta tx");
+    db.drop_tree(crate::TX_KEYSPACE).expect("test cleanup tx");
+}
+
 /// Unfortunately the usual Rust unit-test facility can't be used with Baidu SGX SDK,
 /// so this has to be run as a normal app
 pub fn test_sealing() {
@@ -64,7 +71,7 @@ pub fn test_sealing() {
         .filter(None, LevelFilter::Debug)
         .write_style(WriteStyle::Always)
         .init();
-    let db = Db::start_default(".enclave-test").expect("failed to open a storage path");
+    let mut db = Db::open(".enclave-test").expect("failed to open a storage path");
     let metadb = db
         .open_tree(crate::META_KEYSPACE)
         .expect("failed to open a meta keyspace");
@@ -72,17 +79,21 @@ pub fn test_sealing() {
         .open_tree(crate::TX_KEYSPACE)
         .expect("failed to open a tx keyspace");
 
-    let enclave = match init_enclave(metadb, true, VALIDATION_TOKEN_KEY) {
-        Ok(r) => {
+    let token = get_token(metadb.clone(), VALIDATION_TOKEN_KEY);
+    let enclave = match init_enclave(true, token) {
+        (Ok(r), new_token) => {
             info!("[+] Init Enclave Successful {}!", r.geteid());
+            if let Some(launch_token) = new_token {
+                store_token(metadb, VALIDATION_TOKEN_KEY, launch_token.to_vec());
+            }
             r
         }
-        Err(x) => {
+        (Err(x), _) => {
             error!("[-] Init Enclave Failed {}!", x.as_str());
             return;
         }
     };
-    assert!(check_initchain(enclave.geteid(), TEST_NETWORK_ID).is_ok());
+    assert!(check_initchain(enclave.geteid(), TEST_NETWORK_ID, None).is_ok());
 
     let secp = Secp256k1::new();
     let secret_key = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
@@ -125,6 +136,7 @@ pub fn test_sealing() {
             debug!("new tx not in DB yet");
         }
         _ => {
+            cleanup(&mut db);
             assert!(false, "new tx already in db");
         }
     };
@@ -137,6 +149,7 @@ pub fn test_sealing() {
             tx.to_vec()
         }
         _ => {
+            cleanup(&mut db);
             assert!(false, "new tx not in db");
             vec![]
         }
@@ -146,7 +159,7 @@ pub fn test_sealing() {
     let utxo1 = TxoPointer::new(*txid, 0);
     let mut tx1 = Tx::new();
     tx1.attributes = TxAttributes::new(TEST_NETWORK_ID);
-    tx1.add_input(utxo1);
+    tx1.add_input(utxo1.clone());
     tx1.add_output(TxOut::new(eaddr.clone(), halfcoin));
     let txid1 = tx1.id();
     let witness1 = vec![TxInWitness::TreeSig(
@@ -180,7 +193,7 @@ pub fn test_sealing() {
     let r2 = check_transfertx(
         enclave.geteid(),
         transfertx,
-        vec![sealedtx],
+        vec![sealedtx.clone()],
         info,
         txdb.clone(),
     );
@@ -191,10 +204,53 @@ pub fn test_sealing() {
             debug!("new 2nd tx in DB!");
         }
         _ => {
+            cleanup(&mut db);
             assert!(false, "new 2nd tx not in db");
         }
     };
 
-    db.drop_tree(crate::META_KEYSPACE).expect("test meta tx");
-    db.drop_tree(crate::TX_KEYSPACE).expect("test cleanup tx");
+    let mut tx2 = Tx::new();
+    tx2.attributes = TxAttributes::new(TEST_NETWORK_ID);
+    tx2.add_input(utxo1);
+    tx2.add_output(TxOut::new(eaddr.clone(), Coin::zero()));
+    let txid2 = tx2.id();
+    let witness2 = vec![TxInWitness::TreeSig(
+        schnorr_sign(&secp, &Message::from_slice(&txid2).unwrap(), &secret_key).0,
+        merkle_tree
+            .generate_proof(RawPubkey::from(public_key.serialize()))
+            .unwrap(),
+    )]
+    .into();
+    let plain_txaux2 = PlainTxAux::TransferTx(tx2.clone(), witness2);
+    let transfertx2 = TxAux::TransferTx {
+        txid: tx2.id(),
+        inputs: tx2.inputs.clone(),
+        no_of_outputs: tx2.outputs.len() as TxoIndex,
+        payload: TxObfuscated {
+            key_from: 0,
+            nonce: [0u8; 12],
+            txpayload: plain_txaux2.encode(),
+        },
+    };
+    let r3 = check_transfertx(
+        enclave.geteid(),
+        transfertx2,
+        vec![sealedtx],
+        info,
+        txdb.clone(),
+    );
+    match r3 {
+        Err(Error::ZeroCoin) => {
+            debug!("invalid transaction rejected and error code returned");
+        }
+        x => {
+            cleanup(&mut db);
+            panic!(
+                "something else happened (tx not correctly rejected): {:?}",
+                x
+            );
+        }
+    };
+
+    cleanup(&mut db);
 }

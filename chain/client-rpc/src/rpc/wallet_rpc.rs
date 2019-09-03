@@ -1,29 +1,19 @@
 use jsonrpc_core::Result;
 use jsonrpc_derive::rpc;
-use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-use chain_core::init::address::CroAddress;
 use chain_core::init::coin::Coin;
 use chain_core::tx::data::access::{TxAccess, TxAccessPolicy};
 use chain_core::tx::data::address::ExtendedAddr;
 use chain_core::tx::data::attribute::TxAttributes;
 use chain_core::tx::data::output::TxOut;
-use client_common::balance::BalanceChange;
+use chain_core::tx::data::TxId;
+use chain_core::tx::TxAux;
+use client_common::balance::TransactionChange;
 use client_common::{PublicKey, Result as CommonResult};
 use client_core::{MultiSigWalletClient, WalletClient};
 
 use crate::server::{rpc_error_from_string, to_rpc_error, WalletRequest};
-
-#[derive(Serialize, Deserialize)]
-pub struct RowTx {
-    kind: String,
-    transaction_id: String,
-    address: String,
-    height: String,
-    time: String,
-    amount: String,
-}
 
 #[rpc]
 pub trait WalletRpc: Send + Sync {
@@ -39,8 +29,20 @@ pub trait WalletRpc: Send + Sync {
     #[rpc(name = "wallet_createTransferAddress")]
     fn create_transfer_address(&self, request: WalletRequest) -> Result<String>;
 
+    #[rpc(name = "wallet_getViewKey")]
+    fn get_view_key(&self, request: WalletRequest) -> Result<String>;
+
     #[rpc(name = "wallet_list")]
     fn list(&self) -> Result<Vec<String>>;
+
+    #[rpc(name = "wallet_listPublicKeys")]
+    fn list_public_keys(&self, request: WalletRequest) -> Result<Vec<PublicKey>>;
+
+    #[rpc(name = "wallet_listStakingAddresses")]
+    fn list_staking_addresses(&self, request: WalletRequest) -> Result<Vec<String>>;
+
+    #[rpc(name = "wallet_listTransferAddresses")]
+    fn list_transfer_addresses(&self, request: WalletRequest) -> Result<Vec<String>>;
 
     #[rpc(name = "wallet_sendToAddress")]
     fn send_to_address(
@@ -49,16 +51,10 @@ pub trait WalletRpc: Send + Sync {
         to_address: String,
         amount: Coin,
         view_keys: Vec<String>,
-    ) -> Result<()>;
-
-    #[rpc(name = "wallet_listStakingAddresses")]
-    fn list_staking_addresses(&self, request: WalletRequest) -> Result<Vec<String>>;
-
-    #[rpc(name = "wallet_listTransferAddresses")]
-    fn list_transfer_addresses(&self, request: WalletRequest) -> Result<Vec<String>>;
+    ) -> Result<String>;
 
     #[rpc(name = "wallet_transactions")]
-    fn transactions(&self, request: WalletRequest) -> Result<Vec<RowTx>>;
+    fn transactions(&self, request: WalletRequest) -> Result<Vec<TransactionChange>>;
 }
 
 pub struct WalletRpcImpl<T>
@@ -116,13 +112,47 @@ where
             .new_transfer_address(&request.name, &request.passphrase)
             .map_err(to_rpc_error)?;
 
-        extended_address
-            .to_cro()
-            .map_err(|err| rpc_error_from_string(format!("{}", err)))
+        Ok(extended_address.to_string())
+    }
+
+    fn get_view_key(&self, request: WalletRequest) -> Result<String> {
+        let public_key = self
+            .client
+            .view_key(&request.name, &request.passphrase)
+            .map_err(to_rpc_error)?;
+        Ok(public_key.to_string())
+    }
+
+    fn get_view_key(&self, request: WalletRequest) -> Result<String> {
+        let public_key = self
+            .client
+            .view_key(&request.name, &request.passphrase)
+            .map_err(to_rpc_error)?;
+        Ok(format!("{}", public_key))
     }
 
     fn list(&self) -> Result<Vec<String>> {
         self.client.wallets().map_err(to_rpc_error)
+    }
+
+    fn list_public_keys(&self, request: WalletRequest) -> Result<Vec<PublicKey>> {
+        self.client
+            .public_keys(&request.name, &request.passphrase)
+            .map_err(to_rpc_error)
+    }
+
+    fn list_staking_addresses(&self, request: WalletRequest) -> Result<Vec<String>> {
+        self.client
+            .staking_addresses(&request.name, &request.passphrase)
+            .map(|addresses| addresses.iter().map(ToString::to_string).collect())
+            .map_err(to_rpc_error)
+    }
+
+    fn list_transfer_addresses(&self, request: WalletRequest) -> Result<Vec<String>> {
+        self.client
+            .transfer_addresses(&request.name, &request.passphrase)
+            .map(|addresses| addresses.iter().map(ToString::to_string).collect())
+            .map_err(to_rpc_error)
     }
 
     fn send_to_address(
@@ -131,15 +161,15 @@ where
         to_address: String,
         amount: Coin,
         view_keys: Vec<String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let address = to_address
             .parse::<ExtendedAddr>()
             .map_err(|err| rpc_error_from_string(format!("{}", err)))?;
         let tx_out = TxOut::new(address, amount);
 
         let view_keys = view_keys
-            .into_iter()
-            .map(|key| PublicKey::from_str(&key))
+            .iter()
+            .map(|view_key| PublicKey::from_str(view_key))
             .collect::<CommonResult<Vec<PublicKey>>>()
             .map_err(to_rpc_error)?;
 
@@ -181,59 +211,21 @@ where
 
         self.client
             .broadcast_transaction(&transaction)
-            .map_err(to_rpc_error)
-    }
+            .map_err(to_rpc_error)?;
 
-    fn list_staking_addresses(&self, request: WalletRequest) -> Result<Vec<String>> {
-        match self
-            .client
-            .staking_addresses(&request.name, &request.passphrase)
-        {
-            Ok(addresses) => addresses
-                .iter()
-                .map(|address| Ok(address.to_string()))
-                .collect(),
-            Err(e) => Err(to_rpc_error(e)),
+        if let TxAux::TransferTx { txid, .. } = transaction {
+            Ok(hex::encode(txid))
+        } else {
+            Err(rpc_error_from_string(String::from(
+                "Transaction is not transfer transaction",
+            )))
         }
     }
 
-    fn list_transfer_addresses(&self, request: WalletRequest) -> Result<Vec<String>> {
-        match self
-            .client
-            .transfer_addresses(&request.name, &request.passphrase)
-        {
-            Ok(addresses) => addresses
-                .iter()
-                .map(|address| Ok(address.to_string()))
-                .collect(),
-            Err(e) => Err(to_rpc_error(e)),
-        }
-    }
-
-    fn transactions(&self, request: WalletRequest) -> Result<Vec<RowTx>> {
+    fn transactions(&self, request: WalletRequest) -> Result<Vec<TransactionChange>> {
         self.client
             .history(&request.name, &request.passphrase)
             .map_err(to_rpc_error)
-            .map(|transaction_changes| {
-                let rowtxs: Vec<RowTx> = transaction_changes
-                    .into_iter()
-                    .map(|c| {
-                        let bc = match c.balance_change {
-                            BalanceChange::Incoming(change) => ("incoming", u64::from(change)),
-                            BalanceChange::Outgoing(change) => ("outgoing", u64::from(change)),
-                        };
-                        RowTx {
-                            kind: bc.0.to_string(),
-                            transaction_id: hex::encode(c.transaction_id),
-                            address: c.address.to_string(),
-                            height: c.block_height.to_string(),
-                            time: c.block_time.to_string(),
-                            amount: bc.1.to_string(),
-                        }
-                    })
-                    .collect();
-                rowtxs
-            })
     }
 }
 
@@ -303,8 +295,13 @@ pub mod tests {
             })
         }
 
-        fn broadcast_transaction(&self, _transaction: &[u8]) -> CommonResult<()> {
-            Ok(())
+        fn broadcast_transaction(&self, _transaction: &[u8]) -> CommonResult<BroadcastTxResult> {
+            Ok(BroadcastTxResult {
+                code: 0,
+                data: String::from(""),
+                hash: String::from(""),
+                log: String::from(""),
+            })
         }
     }
 
@@ -393,6 +390,9 @@ pub mod tests {
             Ok(Status {
                 sync_info: SyncInfo {
                     latest_block_height: "1".to_string(),
+                    latest_app_hash:
+                        "3891040F29C6A56A5E36B17DCA6992D8F91D1EAAB4439D008D19A9D703271D3C"
+                            .to_string(),
                 },
             })
         }
@@ -401,12 +401,33 @@ pub mod tests {
             Ok(Block {
                 block: BlockInner {
                     header: Header {
+                        app_hash:
+                            "3891040F29C6A56A5E36B17DCA6992D8F91D1EAAB4439D008D19A9D703271D3C"
+                                .to_string(),
                         height: "1".to_string(),
                         time: DateTime::from_str("2019-04-09T09:38:41.735577Z").unwrap(),
                     },
                     data: Data { txs: None },
                 },
             })
+        }
+
+        fn block_batch<'a, T: Iterator<Item = &'a u64>>(
+            &self,
+            _heights: T,
+        ) -> CommonResult<Vec<Block>> {
+            Ok(vec![Block {
+                block: BlockInner {
+                    header: Header {
+                        app_hash:
+                            "3891040F29C6A56A5E36B17DCA6992D8F91D1EAAB4439D008D19A9D703271D3C"
+                                .to_string(),
+                        height: "1".to_string(),
+                        time: DateTime::from_str("2019-04-09T09:38:41.735577Z").unwrap(),
+                    },
+                    data: Data { txs: None },
+                },
+            }])
         }
 
         fn block_results(&self, _height: u64) -> CommonResult<BlockResults> {
@@ -419,13 +440,41 @@ pub mod tests {
             })
         }
 
-        fn broadcast_transaction(&self, _transaction: &[u8]) -> CommonResult<()> {
+        fn block_results_batch<'a, T: Iterator<Item = &'a u64>>(
+            &self,
+            _heights: T,
+        ) -> CommonResult<Vec<BlockResults>> {
+            Ok(vec![BlockResults {
+                height: "1".to_string(),
+                results: Results {
+                    deliver_tx: None,
+                    end_block: None,
+                },
+            }])
+        }
+
+        fn broadcast_transaction(&self, _transaction: &[u8]) -> CommonResult<BroadcastTxResult> {
             unreachable!("broadcast_transaction")
         }
 
         fn query(&self, _path: &str, _data: &[u8]) -> CommonResult<QueryResult> {
             unreachable!("query")
         }
+    }
+
+    #[test]
+    fn balance_should_return_wallet_balance() {
+        let wallet_rpc = setup_wallet_rpc();
+
+        wallet_rpc
+            .create(create_wallet_request("Default", "123456"))
+            .unwrap();
+        assert_eq!(
+            Coin::new(30).unwrap(),
+            wallet_rpc
+                .balance(create_wallet_request("Default", "123456"))
+                .unwrap()
+        )
     }
 
     mod create {
@@ -488,58 +537,6 @@ pub mod tests {
     }
 
     #[test]
-    fn list_should_list_all_wallets() {
-        let wallet_rpc = setup_wallet_rpc();
-
-        assert_eq!(0, wallet_rpc.list().unwrap().len());
-
-        wallet_rpc
-            .create(create_wallet_request("Default", "123456"))
-            .unwrap();
-
-        assert_eq!(vec!["Default"], wallet_rpc.list().unwrap());
-
-        wallet_rpc
-            .create(create_wallet_request("Personal", "123456"))
-            .unwrap();
-
-        let wallet_list = wallet_rpc.list().unwrap();
-        assert_eq!(2, wallet_list.len());
-        assert!(wallet_list.contains(&"Default".to_owned()));
-        assert!(wallet_list.contains(&"Personal".to_owned()));
-    }
-
-    #[test]
-    fn balance_should_return_wallet_balance() {
-        let wallet_rpc = setup_wallet_rpc();
-
-        wallet_rpc
-            .create(create_wallet_request("Default", "123456"))
-            .unwrap();
-        assert_eq!(
-            Coin::new(30).unwrap(),
-            wallet_rpc
-                .balance(create_wallet_request("Default", "123456"))
-                .unwrap()
-        )
-    }
-
-    #[test]
-    fn transactions_should_return_list_of_wallet_transactions() {
-        let wallet_rpc = setup_wallet_rpc();
-        let wallet_request = create_wallet_request("Default", "123456");
-
-        wallet_rpc.create(wallet_request.clone()).unwrap();
-        assert_eq!(
-            1,
-            wallet_rpc
-                .transactions(wallet_request.clone())
-                .unwrap()
-                .len()
-        )
-    }
-
-    #[test]
     fn create_staking_address_should_work() {
         let wallet_rpc = setup_wallet_rpc();
         let wallet_request = create_wallet_request("Default", "123456");
@@ -594,6 +591,59 @@ pub mod tests {
                 .unwrap()
                 .len()
         );
+    }
+
+    #[test]
+    fn get_view_key_should_return_public_key() {
+        let wallet_rpc = setup_wallet_rpc();
+        let wallet_request = create_wallet_request("Default", "123456");
+
+        wallet_rpc.create(wallet_request.clone()).unwrap();
+
+        assert_eq!(
+            wallet_rpc
+                .get_view_key(wallet_request.clone())
+                .unwrap()
+                .len(),
+            66
+        );
+    }
+
+    #[test]
+    fn list_should_list_all_wallets() {
+        let wallet_rpc = setup_wallet_rpc();
+
+        assert_eq!(0, wallet_rpc.list().unwrap().len());
+
+        wallet_rpc
+            .create(create_wallet_request("Default", "123456"))
+            .unwrap();
+
+        assert_eq!(vec!["Default"], wallet_rpc.list().unwrap());
+
+        wallet_rpc
+            .create(create_wallet_request("Personal", "123456"))
+            .unwrap();
+
+        let wallet_list = wallet_rpc.list().unwrap();
+        assert_eq!(2, wallet_list.len());
+        assert!(wallet_list.contains(&"Default".to_owned()));
+        assert!(wallet_list.contains(&"Personal".to_owned()));
+    }
+
+    #[test]
+    fn transactions_should_return_list_of_wallet_transactions() {
+        let wallet_rpc = setup_wallet_rpc();
+        let wallet_request = create_wallet_request("Default", "123456");
+
+        wallet_rpc.create(wallet_request.clone()).unwrap();
+        assert_eq!(
+            1,
+            wallet_rpc
+                .transactions(wallet_request.clone())
+                .unwrap()
+                .len()
+        )
     }
 
     fn make_test_wallet_client(storage: MemoryStorage) -> TestWalletClient {

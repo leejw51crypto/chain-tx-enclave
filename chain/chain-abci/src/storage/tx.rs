@@ -24,17 +24,15 @@ pub fn get_account(
     accounts: &AccountStorage,
 ) -> Result<StakedState, Error> {
     let account_key = to_stake_key(account_address);
-    let items = accounts.get(last_root, &mut [&account_key]);
-    if let Err(e) = items {
-        return Err(Error::IoError(std::io::Error::new(
+    let account = accounts.get_one(last_root, &account_key);
+    match account {
+        Err(_e) => Err(Error::IoError)
+        /* FIXME: Err(Error::IoError(std::io::Error::new(
             std::io::ErrorKind::Other,
             e,
-        )));
-    }
-    let account = items.unwrap()[&account_key].clone();
-    match account {
-        None => Err(Error::AccountNotFound),
-        Some(AccountWrapper(a)) => Ok(a),
+        )))*/,
+        Ok(None) => Err(Error::AccountNotFound),
+        Ok(Some(AccountWrapper(a))) => Ok(a),
     }
 }
 
@@ -59,8 +57,8 @@ fn check_spent_input_lookup(inputs: &[TxoPointer], db: Arc<dyn KeyValueDB>) -> R
             Ok(None) => {
                 return Err(Error::InvalidInput);
             }
-            Err(e) => {
-                return Err(Error::IoError(e));
+            Err(_e) => {
+                return Err(Error::IoError); // FIXME: Err(Error::IoError(e));
             }
         }
     }
@@ -116,16 +114,16 @@ pub fn verify<T: EnclaveProxy>(
         }
         TxAux::UnbondStakeTx(maintx, witness) => {
             let account_address = verify_tx_recover_address(&witness, &maintx.id());
-            if let Err(e) = account_address {
-                return Err(Error::EcdsaCrypto(e));
+            if let Err(_e) = account_address {
+                return Err(Error::EcdsaCrypto); // FIXME: Err(Error::EcdsaCrypto(e));
             }
             let account = get_account(&account_address.unwrap(), last_account_root_hash, accounts)?;
             verify_unbonding(maintx, extra_info, account)?
         }
         TxAux::WithdrawUnbondedStakeTx { txid, witness, .. } => {
             let account_address = verify_tx_recover_address(&witness, &txid);
-            if let Err(e) = account_address {
-                return Err(Error::EcdsaCrypto(e));
+            if let Err(_e) = account_address {
+                return Err(Error::EcdsaCrypto); // FIXME: Err(Error::EcdsaCrypto(e));
             }
             let account = get_account(&account_address.unwrap(), last_account_root_hash, accounts)?;
             let response = tx_validator.process_request(EnclaveRequest::VerifyTx {
@@ -152,7 +150,7 @@ pub mod tests {
     use crate::storage::{Storage, COL_TX_META, NUM_COLUMNS};
     use chain_core::common::{MerkleTree, Timespec};
     use chain_core::init::address::RedeemAddress;
-    use chain_core::init::coin::{Coin, CoinError};
+    use chain_core::init::coin::Coin;
     use chain_core::state::account::StakedStateOpAttributes;
     use chain_core::state::account::{
         DepositBondTx, StakedStateOpWitness, UnbondTx, WithdrawUnbondedTx,
@@ -328,7 +326,7 @@ pub mod tests {
         let key = account.key();
         let wrapped = AccountWrapper(account);
         let new_root = tree
-            .insert(None, &mut [&key], &mut vec![&wrapped])
+            .insert(None, &mut [key], &mut vec![wrapped])
             .expect("insert");
         let tx = UnbondTx::new(
             Coin::new(9).unwrap(),
@@ -479,7 +477,7 @@ pub mod tests {
         let key = account.key();
         let wrapped = AccountWrapper(account.clone());
         let new_root = tree
-            .insert(None, &mut [&key], &mut vec![&wrapped])
+            .insert(None, &mut [key], &mut vec![wrapped])
             .expect("insert");
 
         let sk2 = SecretKey::from_slice(&[0x11; 32]).expect("32 bytes, within curve order");
@@ -640,7 +638,7 @@ pub mod tests {
             let result = verify_unbonded_withdraw(&tx, extra_info, account.clone());
             expect_error(
                 &result,
-                Error::InvalidSum(CoinError::OutOfBound(Coin::max().into())),
+                Error::InvalidSum, // FIXME: Error::InvalidSum(CoinError::OutOfBound(Coin::max().into())),
             );
         }
         // InputOutputDoNotMatch
@@ -1006,7 +1004,7 @@ pub mod tests {
             );
             expect_error(
                 &result,
-                Error::EcdsaCrypto(secp256k1::Error::InvalidPublicKey),
+                Error::EcdsaCrypto, // FIXME: Error::EcdsaCrypto(secp256k1::Error::InvalidPublicKey),
             );
             let txaux = replace_tx_payload(
                 txaux.clone(),
@@ -1292,7 +1290,7 @@ pub mod tests {
             let result = verify_transfer(&tx, &witness, extra_info, vec![]);
             expect_error(
                 &result,
-                Error::InvalidSum(CoinError::OutOfBound(Coin::max().into())),
+                Error::InvalidSum, // FIXME: Error::InvalidSum(CoinError::OutOfBound(Coin::max().into())),
             );
             let txaux = replace_tx_payload(
                 txaux.clone(),
@@ -1365,7 +1363,7 @@ pub mod tests {
             );
             expect_error(
                 &result,
-                Error::EcdsaCrypto(secp256k1::Error::InvalidPublicKey),
+                Error::EcdsaCrypto, // FIXME: Error::EcdsaCrypto(secp256k1::Error::InvalidPublicKey),
             );
             let txaux = replace_tx_payload(
                 txaux.clone(),

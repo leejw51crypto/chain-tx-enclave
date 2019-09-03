@@ -12,7 +12,7 @@
 extern crate sgx_tstd as std;
 
 use parity_scale_codec::{Decode, Encode, Error, Input, Output};
-use std::prelude::v1::Vec;
+use std::prelude::v1::{Box, Vec};
 
 use chain_core::common::{H256, H264, H512};
 use chain_core::state::account::DepositBondTx;
@@ -30,16 +30,21 @@ use secp256k1::{
 };
 
 const ENCRYPTION_REQUEST_SIZE: usize = 1024 * 60; // 60 KB
+const TOKEN_LEN: usize = 1024;
 
 /// requests sent from chain-abci app to enclave wrapper server
-/// FIXME: the variant will be smaller once the TX storage is on the enclave side
+/// FIXME: box chain info or txaux?
 #[allow(clippy::large_enum_variant)]
 #[derive(Encode, Decode)]
 pub enum EnclaveRequest {
     /// a sanity check (sends the chain network ID -- last byte / two hex digits convention)
     /// during InitChain or startup (to test one connected to the correct process)
+    /// and the last processed app hash
     /// FIXME: test genesis hash etc.
-    CheckChain { chain_hex_id: u8 },
+    CheckChain {
+        chain_hex_id: u8,
+        last_app_hash: Option<H256>,
+    },
     /// "stateless" transaction validation requests (sends transaction + all required information)
     /// double-spent / BitVec check done in chain-abci
     /// FIXME: when sealing is done, sealed TX would probably be stored by enclave server, hence this should send TxPointers instead
@@ -49,16 +54,36 @@ pub enum EnclaveRequest {
         account: Option<StakedState>,
         info: ChainInfo,
     },
+    /// request to flush/persist storage + store the computed app hash
+    /// FIXME: enclave should be able to compute a part of app hash, so send the other parts and check the same app hash was computed
+    CommitBlock { app_hash: H256 },
+    /// request to get a stored launch token (requested by TDQE -- they should be on the same machine)
+    GetCachedLaunchToken { enclave_metaname: Vec<u8> },
+    /// request to update the stored launch token (requested by TDQE -- they should be on the same machine)
+    UpdateCachedLaunchToken {
+        enclave_metaname: Vec<u8>,
+        token: Box<[u8; TOKEN_LEN]>,
+    },
+    /// request to get tx data sealed to "mrsigner" (requested by TDQE -- they should be on the same machine)
+    GetSealedTxData { txids: Vec<TxId> },
 }
 
 /// reponses sent from enclave wrapper server to chain-abci app
 /// TODO: better error responses?
 #[derive(Encode, Decode)]
 pub enum EnclaveResponse {
-    /// returns OK if chain_hex_id matches the one embedded in enclave
-    CheckChain(Result<(), ()>),
+    /// returns OK if chain_hex_id matches the one embedded in enclave and last_app_hash matches (returns the last app hash if any)
+    CheckChain(Result<(), Option<H256>>),
     /// returns the affected (account) state (if any) and paid fee if the TX is valid
-    VerifyTx(Result<(Fee, Option<StakedState>), ()>),
+    VerifyTx(Result<(Fee, Option<StakedState>), chain_tx_validation::Error>),
+    /// returns if the data was sucessfully persisted in the enclave's local storage
+    CommitBlock(Result<(), ()>),
+    /// returns a stored launch token if any
+    GetCachedLaunchToken(Result<Option<Box<[u8; TOKEN_LEN]>>, ()>),
+    /// indicates whether the update was successful
+    UpdateCachedLaunchToken(Result<(), ()>),
+    /// returns Some(sealed data payloads) or None (if any TXID was not found / invalid)
+    GetSealedTxData(Option<Vec<Vec<u8>>>),
     /// response if unsupported tx type is sent (e.g. unbondtx) -- TODO: probably unnecessary if there is a data type with a subset of TxAux
     UnsupportedTxType,
     /// response if the enclave failed to parse the request

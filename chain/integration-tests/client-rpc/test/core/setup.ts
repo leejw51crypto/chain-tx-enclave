@@ -1,38 +1,61 @@
+import BigNumber from "bignumber.js";
 import { RpcClient } from "./rpc-client";
 import * as addressState from "../../../address-state.json";
+import { syncWallet } from "./rpc";
+import {
+	shouldTest,
+	FEE_SCHEMA,
+	newRpcClient,
+	newWalletRequest,
+	sleep,
+} from "./utils";
 
-export const DEFAULT_WALLET_ADDRESS = (<any>addressState).default;
-export const SPEND_WALLET_ADDRESS = (<any>addressState).spend;
-export const VIEW_WALLET_ADDRESS = (<any>addressState).view;
-export const RECEIVE_WALLET_ADDRESS = (<any>addressState).receive;
+export const WALLET_STAKING_ADDRESS = (<any>addressState).staking;
+export const WALLET_TRANSFER_ADDRESS_1 = (<any>addressState).transfer[0];
+export const WALLET_TRANSFER_ADDRESS_2 = (<any>addressState).transfer[1];
 
-const clientRpcPort = Number(process.env.CLIENT_RPC_ZERO_FEE_PORT) || 16659;
+export const unbondAndWithdrawStake = async () => {
+	if (shouldTest(FEE_SCHEMA.ZERO_FEE)) {
+		const zeroFeeClient: RpcClient = newRpcClient();
+		await unbondAndWithdrawStakeFromClient(zeroFeeClient);
+	}
 
-export const newRpcClient = (host: string = "localhost", port: number = clientRpcPort) => {
-    return new RpcClient(`http://${host}:${port}`);
+	if (shouldTest(FEE_SCHEMA.WITH_FEE)) {
+		const withFeeClient: RpcClient = newRpcClient("localhost", 26659);
+		await unbondAndWithdrawStakeFromClient(withFeeClient);
+	}
 };
 
-export const sleep = (ms: number = 1000) => {
-  return new Promise(resolve => {
-    setTimeout(resolve, ms);
-  });
+const unbondAndWithdrawStakeFromClient = async (client: RpcClient) => {
+	const walletRequest = newWalletRequest("Default", "123456");
+
+	await syncWallet(client, walletRequest);
+
+	const walletBalance = await client.request("wallet_balance", [walletRequest]);
+	console.info(`[Info] Wallet balance: ${walletBalance}`);
+	if (new BigNumber(walletBalance).isGreaterThan("0")) {
+		console.info("[Init] Bonded funds already withdrew");
+		return;
+	}
+	console.log("[Init] Withdrawing bonded funds");
+
+	console.log(
+		`[Init] Withdrawing bonded genesis funds from "${WALLET_STAKING_ADDRESS}" to "${WALLET_TRANSFER_ADDRESS_1}"`,
+	);
+	await client.request("staking_withdrawAllUnbondedStake", [
+		walletRequest,
+		WALLET_STAKING_ADDRESS,
+		WALLET_TRANSFER_ADDRESS_1,
+		[],
+	]);
+	await sleep(1000);
+
+	await syncWallet(client, walletRequest);
 };
 
-interface WalletRequest {
-  name: string;
-  passphrase: string;
+if (!shouldTest(FEE_SCHEMA.ZERO_FEE)) {
+	console.info("[Test] Skipping Zero Fee Tests");
 }
-
-export const generateWalletName = (prefix: string = "New Wallet"): string => {
-  return `${prefix} ${Date.now()}`;
-};
-
-export const newWalletRequest = (
-  name: string,
-  passphrase: string = "uV97tEs5!*lLRQKj"
-): WalletRequest => {
-  return {
-    name,
-    passphrase
-  };
-};
+if (!shouldTest(FEE_SCHEMA.WITH_FEE)) {
+	console.info("[Test] Skipping With Fee Tests");
+}

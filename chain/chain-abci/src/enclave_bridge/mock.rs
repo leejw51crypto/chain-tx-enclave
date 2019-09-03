@@ -36,13 +36,14 @@ impl MockClient {
 impl EnclaveProxy for MockClient {
     fn process_request(&mut self, request: EnclaveRequest) -> EnclaveResponse {
         match request {
-            EnclaveRequest::CheckChain { chain_hex_id } => {
+            EnclaveRequest::CheckChain { chain_hex_id, .. } => {
                 if chain_hex_id == self.chain_hex_id {
                     EnclaveResponse::CheckChain(Ok(()))
                 } else {
-                    EnclaveResponse::CheckChain(Err(()))
+                    EnclaveResponse::CheckChain(Err(None))
                 }
             }
+            EnclaveRequest::CommitBlock { .. } => EnclaveResponse::CommitBlock(Ok(())),
             EnclaveRequest::VerifyTx { tx, account, info } => {
                 let (txpayload, inputs) = match &tx {
                     TxAux::TransferTx {
@@ -76,17 +77,15 @@ impl EnclaveProxy for MockClient {
                 match (tx, plain_tx) {
                     (_, Ok(PlainTxAux::TransferTx(maintx, witness))) => {
                         let result = verify_transfer(&maintx, &witness, info, inputs);
-                        if let Ok(fee) = result {
+                        if result.is_ok() {
                             self.local_tx_store
                                 .insert(maintx.id(), TxWithOutputs::Transfer(maintx));
-                            EnclaveResponse::VerifyTx(Ok((fee, account)))
-                        } else {
-                            EnclaveResponse::VerifyTx(Err(()))
                         }
+                        EnclaveResponse::VerifyTx(result.map(|x| (x, None)))
                     }
                     (TxAux::DepositStakeTx { tx, .. }, Ok(PlainTxAux::DepositStakeTx(witness))) => {
                         let result = verify_bonded_deposit(&tx, &witness, info, inputs, account);
-                        EnclaveResponse::VerifyTx(result.map_err(|_| ()))
+                        EnclaveResponse::VerifyTx(result)
                     }
                     (_, Ok(PlainTxAux::WithdrawUnbondedStakeTx(tx))) => {
                         let result = verify_unbonded_withdraw(
@@ -97,14 +96,13 @@ impl EnclaveProxy for MockClient {
                         if result.is_ok() {
                             self.local_tx_store
                                 .insert(tx.id(), TxWithOutputs::StakeWithdraw(tx));
-                            EnclaveResponse::VerifyTx(result.map_err(|_| ()))
-                        } else {
-                            EnclaveResponse::VerifyTx(Err(()))
                         }
+                        EnclaveResponse::VerifyTx(result)
                     }
-                    _ => EnclaveResponse::UnsupportedTxType,
+                    _ => EnclaveResponse::UnknownRequest,
                 }
             }
+            _ => EnclaveResponse::UnknownRequest,
         }
     }
 }

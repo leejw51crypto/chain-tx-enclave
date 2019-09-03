@@ -65,6 +65,9 @@ pub enum ErrorKind {
     /// Transaction not found
     #[fail(display = "Transaction not found")]
     TransactionNotFound,
+    /// Output not found
+    #[fail(display = "Output not found")]
+    OutputNotFound,
     /// Private key not found
     #[fail(display = "Private key not found")]
     PrivateKeyNotFound,
@@ -119,6 +122,12 @@ pub enum ErrorKind {
     /// TDQE connection failure
     #[fail(display = "Transaction decryption enclave connection failure")]
     TDQEConnectionError,
+    /// Multisig error
+    #[fail(display = "Invalid self public key in wallet multisig address")]
+    MultiSigInvalidSelfPubKey,
+    /// Transaction validation failure
+    #[fail(display = "Transaction validation failed")]
+    TransactionValidationFailed,
 }
 
 impl Fail for Error {

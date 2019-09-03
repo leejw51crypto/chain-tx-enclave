@@ -9,6 +9,7 @@ use crate::{ErrorKind, Result};
 
 /// Incoming or Outgoing balance change
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
+#[serde(tag = "kind", content = "amount")]
 pub enum BalanceChange {
     /// Represents balance addition
     Incoming(Coin),
@@ -83,5 +84,4 @@ mod tests {
 
         assert!(coin.is_err(), "Created negative coin")
     }
-
 }
